@@ -246,7 +246,6 @@ st.title("🧠 Welcome to the AI WORLD, This is your EV assistant")
 
 # --- SIDEBAR ---
 with st.sidebar:
-    st.header("🔑 API Keys")
     
     st.divider()
     
