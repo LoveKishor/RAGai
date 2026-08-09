@@ -1,0 +1,445 @@
+import streamlit as st
+import os
+import hashlib
+import time
+from dotenv import load_dotenv
+
+# LangChain & Vector DB
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_pinecone import PineconeVectorStore
+
+# LLM & Prompting
+from langchain_groq import ChatGroq
+from langchain.prompts import PromptTemplate
+
+# Pinecone SDK v5
+from pinecone import Pinecone, ServerlessSpec
+
+# ------------------------------
+# 0. HELPER: Sanitize API Keys
+# ------------------------------
+def sanitize_api_key(key):
+    """Remove whitespace and non-ASCII characters from an API key."""
+    if not key:
+        return ""
+    # Strip spaces/newlines, then encode to ASCII ignoring bad chars
+    return key.strip().encode('ascii', 'ignore').decode('ascii')
+
+# ------------------------------
+# 1. ENVIRONMENT & SESSION STATE
+# ------------------------------
+load_dotenv()  # Load .env file locally
+
+# Pinecone API Key – always from environment (admin's key)
+if "pinecone_api_key" not in st.session_state:
+    pinecone_key = os.getenv("PINECONE_API_KEY")
+    if not pinecone_key:
+        st.error("🚨 PINECONE_API_KEY not found in environment variables.")
+        st.stop()
+    st.session_state.pinecone_api_key = sanitize_api_key(pinecone_key)
+
+# Groq API Key – admin uses env, users enter their own
+if "groq_api_key" not in st.session_state:
+    st.session_state.groq_api_key = ""
+if "user_provided_groq_key" not in st.session_state:
+    st.session_state.user_provided_groq_key = ""
+
+# Admin authorization flags
+if "upload_authorized" not in st.session_state:
+    st.session_state.upload_authorized = False
+if "feedback_authorized" not in st.session_state:
+    st.session_state.feedback_authorized = False
+if "feedback_enabled" not in st.session_state:
+    st.session_state.feedback_enabled = False
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+INDEX_NAME = "self-learning-rag"
+
+# ------------------------------
+# 2. ALL FUNCTION DEFINITIONS
+# ------------------------------
+
+@st.cache_resource
+def get_embeddings():
+    return HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+
+@st.cache_resource
+def get_llm(api_key):
+    """
+    Returns a ChatGroq instance using the provided API key.
+    The key is sanitized to avoid encoding errors.
+    """
+    if not api_key:
+        st.error("Groq API key is missing.")
+        st.stop()
+    safe_key = sanitize_api_key(api_key)
+    if not safe_key:
+        st.error("Invalid Groq API key (empty after sanitization).")
+        st.stop()
+    return ChatGroq(
+        temperature=0.3,
+        groq_api_key=safe_key,
+        model_name="llama-3.3-70b-versatile"
+    )
+
+@st.cache_resource
+def get_cross_encoder():
+    from sentence_transformers import CrossEncoder
+    return CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
+
+def get_pinecone():
+    if not st.session_state.pinecone_api_key:
+        st.error("Pinecone API key is missing.")
+        st.stop()
+    return Pinecone(api_key=st.session_state.pinecone_api_key)
+
+def ensure_index():
+    pc = get_pinecone()
+    if INDEX_NAME not in pc.list_indexes().names():
+        pc.create_index(
+            name=INDEX_NAME,
+            dimension=384,
+            metric="cosine",
+            spec=ServerlessSpec(cloud="aws", region="us-east-1")
+        )
+
+def generate_document_id(text):
+    return hashlib.md5(text.encode('utf-8')).hexdigest()
+
+def ingest_pdfs(uploaded_files, namespace="pdfs"):
+    embeddings = get_embeddings()
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1000,
+        chunk_overlap=200,
+        length_function=len
+    )
+    
+    all_chunks = []
+    all_ids = []
+    all_metadatas = []
+    
+    for file in uploaded_files:
+        with open(file.name, "wb") as f:
+            f.write(file.getbuffer())
+        loader = PyPDFLoader(file.name)
+        docs = loader.load()
+        chunks = splitter.split_documents(docs)
+        
+        for chunk in chunks:
+            chunk_id = generate_document_id(chunk.page_content)
+            all_chunks.append(chunk.page_content)
+            all_ids.append(chunk_id)
+            all_metadatas.append({"source": file.name})
+        os.remove(file.name)
+    
+    vector_store = PineconeVectorStore(
+        index_name=INDEX_NAME,
+        embedding=embeddings,
+        namespace=namespace,
+        pinecone_api_key=st.session_state.pinecone_api_key
+    )
+    vector_store.add_texts(
+        texts=all_chunks,
+        metadatas=all_metadatas,
+        ids=all_ids
+    )
+    return len(all_chunks)
+
+def hyde_retrieve(question, k=15):
+    llm = get_llm(st.session_state.groq_api_key)
+    hyde_prompt = PromptTemplate.from_template(
+        "Write a concise passage that answers the following question. "
+        "Do not say 'I don't know'. Just write a factual passage:\n\nQuestion: {question}\n\nPassage:"
+    )
+    chain = hyde_prompt | llm
+    hypothetical_answer = chain.invoke({"question": question}).content
+    
+    embeddings = get_embeddings()
+    vector_store = PineconeVectorStore(
+        index_name=INDEX_NAME,
+        embedding=embeddings,
+        namespace="pdfs",
+        pinecone_api_key=st.session_state.pinecone_api_key
+    )
+    retriever = vector_store.as_retriever(search_kwargs={"k": k})
+    documents = retriever.invoke(hypothetical_answer)
+    return documents
+
+def rerank_documents(query, documents, top_k=4):
+    if not documents:
+        return []
+    cross_encoder = get_cross_encoder()
+    pairs = [[query, doc.page_content] for doc in documents]
+    scores = cross_encoder.predict(pairs)
+    doc_score_pairs = list(zip(documents, scores))
+    doc_score_pairs.sort(key=lambda x: x[1], reverse=True)
+    reranked_docs = [doc for doc, _ in doc_score_pairs[:top_k]]
+    return reranked_docs
+
+def retrieve_memory(question, k=2):
+    embeddings = get_embeddings()
+    vector_store = PineconeVectorStore(
+        index_name=INDEX_NAME,
+        embedding=embeddings,
+        namespace="memory",
+        pinecone_api_key=st.session_state.pinecone_api_key
+    )
+    retriever = vector_store.as_retriever(search_kwargs={"k": k})
+    return retriever.invoke(question)
+
+def save_to_memory(question, answer):
+    embeddings = get_embeddings()
+    vector_store = PineconeVectorStore(
+        index_name=INDEX_NAME,
+        embedding=embeddings,
+        namespace="memory",
+        pinecone_api_key=st.session_state.pinecone_api_key
+    )
+    text = f"Question: {question}\nAnswer: {answer}"
+    doc_id = generate_document_id(text)
+    vector_store.add_texts(
+        texts=[text],
+        metadatas=[{"type": "user_feedback"}],
+        ids=[doc_id]
+    )
+
+def generate_final_answer(question, context_docs, memory_docs):
+    llm = get_llm(st.session_state.groq_api_key)
+    context_text = "\n\n".join([doc.page_content for doc in context_docs])
+    memory_text = ""
+    if memory_docs:
+        memory_text = "## 💡 Past Lessons for similar questions:\n" + "\n\n".join([doc.page_content for doc in memory_docs])
+    
+    prompt_template = PromptTemplate.from_template(
+        """
+        You are an expert assistant. Answer the question ONLY based on the provided context.
+        
+        {memory_text}
+        
+        ### Relevant Context from Documents:
+        {context}
+        
+        ### Question:
+        {question}
+        
+        If Past Lessons are relevant, apply their corrections. Be concise and factual.
+        Answer:
+        """
+    )
+    chain = prompt_template | llm
+    response = chain.invoke({
+        "memory_text": memory_text,
+        "context": context_text,
+        "question": question
+    })
+    return response.content
+
+# ------------------------------
+# 3. STREAMLIT USER INTERFACE
+# ------------------------------
+
+st.set_page_config(page_title="Self-Learning RAG (HyDE + Rerank)", layout="wide")
+st.title("🧠 Welcome to the AI WORLD, This is your EV assistant")
+
+# --- SIDEBAR ---
+with st.sidebar:
+    st.header("🔑 API Keys")
+    
+    st.divider()
+    
+    # --- Groq API Key Section ---
+    st.header("🤖 Groq API Key")
+    
+    is_admin = st.session_state.upload_authorized or st.session_state.feedback_authorized
+    
+    if is_admin:
+        # Admin: use env key
+        admin_groq_key = os.getenv("GROQ_API_KEY")
+        if admin_groq_key:
+            safe_key = sanitize_api_key(admin_groq_key)
+            st.session_state.groq_api_key = safe_key
+            st.success("✅ Using Admin's Groq API Key (from environment)")
+            st.caption(f"Key starts with: {safe_key[:3]}...")
+        else:
+            st.error("❌ GROQ_API_KEY not found in environment.")
+    else:
+        # Normal user: ask for their own key
+        st.info("🔑 Enter your own Groq API Key to chat (free at console.groq.com)")
+        user_key = st.text_input(
+            "Your Groq API Key",
+            type="password",
+            value=st.session_state.user_provided_groq_key,
+            key="groq_user_input",
+            help="Get your free key at console.groq.com"
+        )
+        if user_key:
+            cleaned_key = sanitize_api_key(user_key)
+            if cleaned_key:
+                st.session_state.user_provided_groq_key = cleaned_key
+                st.session_state.groq_api_key = cleaned_key
+                st.success("✅ Groq key set!")
+                st.caption(f"Key starts with: {cleaned_key[:3]}...")
+            else:
+                st.error("❌ Invalid key (empty after cleaning).")
+    
+    st.divider()
+    
+    # --- Upload Protection (Admin Login) ---
+    st.header("🔒 Upload Protection")
+    upload_password = st.text_input(
+        "Enter password to upload PDFs",
+        type="password"
+    )
+    if st.button("🔓 Verify Upload Password"):
+        correct_password = os.getenv("UPLOAD_PASSWORD", "admin123")
+        if upload_password == correct_password:
+            st.session_state.upload_authorized = True
+            st.success("✅ Access granted! You can now upload PDFs.")
+            # Load admin Groq key
+            admin_groq_key = os.getenv("GROQ_API_KEY")
+            if admin_groq_key:
+                st.session_state.groq_api_key = sanitize_api_key(admin_groq_key)
+                st.success("✅ Admin Groq key loaded!")
+            st.rerun()
+        else:
+            st.session_state.upload_authorized = False
+            st.error("❌ Wrong password!")
+    
+    st.divider()
+    
+    # --- Feedback Mode Toggle (Admin only) ---
+    st.header("👍 Feedback Mode")
+    st.caption("Enable or disable user feedback (thumbs up/down).")
+    
+    feedback_password = st.text_input(
+        "Enter admin password to change feedback mode",
+        type="password",
+        key="feedback_password_input"
+    )
+    if st.button("🔑 Authorize Feedback Settings"):
+        correct_password = os.getenv("UPLOAD_PASSWORD", "admin123")
+        if feedback_password == correct_password:
+            st.session_state.feedback_authorized = True
+            st.success("✅ Authorized! You can now toggle feedback.")
+            admin_groq_key = os.getenv("GROQ_API_KEY")
+            if admin_groq_key:
+                st.session_state.groq_api_key = sanitize_api_key(admin_groq_key)
+                st.success("✅ Admin Groq key loaded!")
+            st.rerun()
+        else:
+            st.session_state.feedback_authorized = False
+            st.error("❌ Wrong password!")
+    
+    feedback_toggle = st.checkbox(
+        "Allow User Feedback (👍/👎)",
+        value=st.session_state.feedback_enabled,
+        disabled=not st.session_state.feedback_authorized,
+        key="feedback_checkbox"
+    )
+    if st.session_state.feedback_authorized:
+        st.session_state.feedback_enabled = feedback_toggle
+        if feedback_toggle:
+            st.success("🟢 Feedback is ON")
+        else:
+            st.info("🔴 Feedback is OFF")
+    
+    st.divider()
+    
+    # --- Upload Section (Admin only) ---
+    if st.session_state.upload_authorized:
+        st.header("📤 Update Knowledge Base")
+        uploaded_files = st.file_uploader(
+            "Upload PDFs", 
+            type=["pdf"], 
+            accept_multiple_files=True
+        )
+        
+        if uploaded_files and st.button("🚀 Add to Vector DB"):
+            with st.spinner(f"Processing {len(uploaded_files)} PDF(s)..."):
+                try:
+                    num_chunks = ingest_pdfs(uploaded_files)
+                    st.success(f"✅ Uploaded {num_chunks} chunks to Pinecone (duplicates skipped).")
+                except Exception as e:
+                    st.error(f"❌ Error: {e}")
+    else:
+        st.info("🔒 Upload area is locked. Enter the upload password above.")
+
+# --- MAIN CHAT AREA ---
+st.subheader("💬 Ask anything")
+
+# Ensure Pinecone index exists
+try:
+    ensure_index()
+except Exception as e:
+    st.error(f"❌ Failed to connect to Pinecone: {e}")
+    st.stop()
+
+# Check if Groq key is set
+if not st.session_state.groq_api_key:
+    st.warning("⚠️ Please enter your Groq API key in the sidebar to start chatting.")
+    st.stop()
+
+# Show a subtle confirmation that the key is present
+st.caption(f"🔑 Groq key is active")
+
+# Display chat history
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+
+# User input
+if prompt := st.chat_input("Type your question here..."):
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
+    
+    with st.chat_message("assistant"):
+        with st.spinner("🔍 Retrieving with HyDE..."):
+            retrieved_docs = hyde_retrieve(prompt, k=15)
+        
+        with st.spinner("🔄 Reranking documents..."):
+            top_docs = rerank_documents(prompt, retrieved_docs, top_k=4)
+        
+        with st.spinner("🧠 Recalling past lessons..."):
+            memory_docs = retrieve_memory(prompt, k=2)
+        
+        with st.spinner("💬 Generating answer..."):
+            answer = generate_final_answer(prompt, top_docs, memory_docs)
+            st.markdown(answer)
+        
+        if st.session_state.feedback_enabled:
+            col1, col2, col3 = st.columns([1, 1, 8])
+            with col1:
+                if st.button("👍 Good", key=f"up_{time.time()}"):
+                    save_to_memory(prompt, answer)
+                    st.toast("✅ Memorized this good Q&A!")
+            with col2:
+                if st.button("👎 Wrong", key=f"down_{time.time()}"):
+                    st.session_state["correction_prompt"] = prompt
+                    st.session_state["waiting_for_correction"] = True
+                    st.rerun()
+        else:
+            if st.session_state.upload_authorized or st.session_state.feedback_authorized:
+                st.caption("chat only mode")
+    
+    st.session_state.messages.append({"role": "assistant", "content": answer})
+
+# --- Correction handling ---
+if st.session_state.get("waiting_for_correction", False):
+    with st.chat_message("assistant"):
+        st.warning("🤔 I got it wrong. What is the correct answer?")
+        correction = st.text_input("Enter the correct answer:", key="correction_input")
+        if st.button("Submit Correction"):
+            if correction.strip():
+                if st.session_state.feedback_enabled:
+                    save_to_memory(st.session_state.correction_prompt, correction)
+                    st.success("✅ Correction saved! I will use this for future similar questions.")
+                else:
+                    st.warning("⚠️ Feedback is OFF. Correction not saved.")
+                st.session_state["waiting_for_correction"] = False
+                st.rerun()
+            else:
+                st.error("Please enter a valid correction.")
