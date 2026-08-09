@@ -377,11 +377,11 @@ except Exception as e:
 
 # Check if Groq key is set
 if not st.session_state.groq_api_key:
-    st.warning("⚠️ Please enter your Groq API key in the sidebar to start chatting.")
+    st.warning("⚠️ Please enter your pass key in the sidebar to start chatting.")
     st.stop()
 
 # Show a subtle confirmation that the key is present
-st.caption(f"🔑 Groq key is active")
+st.caption(f"🔑 Chat mode active")
 
 # Display chat history
 for msg in st.session_state.messages:
