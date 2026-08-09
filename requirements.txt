@@ -1,12 +1,15 @@
 streamlit==1.38.0
 langchain==0.3.0
 langchain-community==0.3.0
+langchain-core==0.3.0
 langchain-pinecone==0.3.0
 langchain-text-splitters==0.3.0
 langchain-groq==0.2.0
 pypdf==4.2.0
 sentence-transformers==2.7.0
-pinecone-client==5.0.0
+pinecone==5.0.0          # ✅ CORRECT package (not pinecone-client)
 groq==0.11.0
 python-dotenv==1.0.0
 httpx==0.24.1
+pydantic==2.10.0
+typing-extensions==4.12.0
