@@ -250,7 +250,7 @@ with st.sidebar:
     st.divider()
     
     # --- Groq API Key Section ---
-    st.header("🤖 Groq API Key")
+    st.header("🤖 pass Key")
     
     is_admin = st.session_state.upload_authorized or st.session_state.feedback_authorized
     
@@ -266,20 +266,19 @@ with st.sidebar:
             st.error("❌ GROQ_API_KEY not found in environment.")
     else:
         # Normal user: ask for their own key
-        st.info("🔑 Enter your own Groq API Key to chat (free at console.groq.com)")
+        st.info("🔑 Enter pass Key to chat")
         user_key = st.text_input(
-            "Your Groq API Key",
+            "Your Key",
             type="password",
             value=st.session_state.user_provided_groq_key,
             key="groq_user_input",
-            help="Get your free key at console.groq.com"
         )
         if user_key:
             cleaned_key = sanitize_api_key(user_key)
             if cleaned_key:
                 st.session_state.user_provided_groq_key = cleaned_key
                 st.session_state.groq_api_key = cleaned_key
-                st.success("✅ Groq key set!")
+                st.success("✅key set!")
                 st.caption(f"Key starts with: {cleaned_key[:3]}...")
             else:
                 st.error("❌ Invalid key (empty after cleaning).")
