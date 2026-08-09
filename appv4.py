@@ -395,16 +395,16 @@ if prompt := st.chat_input("Type your question here..."):
         st.markdown(prompt)
     
     with st.chat_message("assistant"):
-        with st.spinner("🔍 Retrieving with HyDE..."):
+        with st.spinner("🔍 thinking..."):
             retrieved_docs = hyde_retrieve(prompt, k=15)
         
-        with st.spinner("🔄 Reranking documents..."):
+        with st.spinner("🔄 analysing..."):
             top_docs = rerank_documents(prompt, retrieved_docs, top_k=4)
         
         with st.spinner("🧠 Recalling past lessons..."):
             memory_docs = retrieve_memory(prompt, k=2)
         
-        with st.spinner("💬 Generating answer..."):
+        with st.spinner("💬 getting  answer for you..."):
             answer = generate_final_answer(prompt, top_docs, memory_docs)
             st.markdown(answer)
         
