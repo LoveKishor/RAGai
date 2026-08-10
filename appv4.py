@@ -241,7 +241,7 @@ def generate_final_answer(question, context_docs, memory_docs):
 # 3. STREAMLIT USER INTERFACE
 # ------------------------------
 
-st.set_page_config(page_title="Self-Learning RAG (HyDE + Rerank)", layout="wide")
+st.set_page_config(page_title="EV-Assistant", layout="wide")
 st.title("🧠 Welcome to the AI WORLD, This is your EV assistant")
 
 # --- SIDEBAR ---
