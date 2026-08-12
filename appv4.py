@@ -14,8 +14,11 @@ from langchain_pinecone import PineconeVectorStore
 from langchain_groq import ChatGroq
 from langchain.prompts import PromptTemplate
 
+os.environ["PINECONE_DISABLE_DEPRECATED_PLUGIN_CHECK"] = "true"
+
 # Pinecone SDK v5
 from pinecone import Pinecone, ServerlessSpec
+from langchain_pinecone import PineconeVectorStore
 
 # ------------------------------
 # 0. HELPER: Sanitize API Keys
