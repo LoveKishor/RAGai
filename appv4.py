@@ -1,3 +1,16 @@
+import subprocess
+import sys
+
+# 🔥 Remove the deprecated plugin that causes the error
+try:
+    subprocess.check_call(
+        [sys.executable, "-m", "pip", "uninstall", "-y", "pinecone-plugin-inference"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL
+    )
+except Exception:
+    pass  # If it's not installed, we don't care
+
 import streamlit as st
 import os
 import hashlib
