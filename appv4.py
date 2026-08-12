@@ -4,6 +4,8 @@ import hashlib
 import time
 from dotenv import load_dotenv
 
+os.environ["PINECONE_DISABLE_DEPRECATED_PLUGIN_CHECK"] = "true"
+
 # LangChain & Vector DB
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -14,7 +16,7 @@ from langchain_pinecone import PineconeVectorStore
 from langchain_groq import ChatGroq
 from langchain.prompts import PromptTemplate
 
-os.environ["PINECONE_DISABLE_DEPRECATED_PLUGIN_CHECK"] = "true"
+
 
 # Pinecone SDK v5
 from pinecone import Pinecone, ServerlessSpec
