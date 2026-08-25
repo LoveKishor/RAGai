@@ -29,14 +29,28 @@ from langchain_pinecone import PineconeVectorStore
 from langchain_groq import ChatGroq
 from langchain.prompts import PromptTemplate
 
-
-
 # Pinecone SDK v5
 from pinecone import Pinecone, ServerlessSpec
 from langchain_pinecone import PineconeVectorStore
 
 # ------------------------------
-# 0. HELPER: Sanitize API Keys
+# 0. HELPER: Get keys from Secrets or .env
+# ------------------------------
+def get_secret_or_env(key_name):
+    """
+    Attempts to read from st.secrets (Streamlit Cloud) first,
+    then falls back to os.getenv (local .env).
+    """
+    try:
+        value = st.secrets.get(key_name)
+        if value:
+            return value
+    except Exception:
+        pass
+    return os.getenv(key_name)
+
+# ------------------------------
+# 1. HELPER: Sanitize API Keys
 # ------------------------------
 def sanitize_api_key(key):
     """Remove whitespace and non-ASCII characters from an API key."""
@@ -46,19 +60,19 @@ def sanitize_api_key(key):
     return key.strip().encode('ascii', 'ignore').decode('ascii')
 
 # ------------------------------
-# 1. ENVIRONMENT & SESSION STATE
+# 2. ENVIRONMENT & SESSION STATE
 # ------------------------------
 load_dotenv()  # Load .env file locally
 
-# Pinecone API Key – always from environment (admin's key)
+# Pinecone API Key – from Secrets or env
 if "pinecone_api_key" not in st.session_state:
-    pinecone_key = os.getenv("PINECONE_API_KEY")
+    pinecone_key = get_secret_or_env("PINECONE_API_KEY")
     if not pinecone_key:
-        st.error("🚨 PINECONE_API_KEY not found in environment variables.")
+        st.error("🚨 PINECONE_API_KEY not found in Streamlit Secrets or .env.")
         st.stop()
     st.session_state.pinecone_api_key = sanitize_api_key(pinecone_key)
 
-# Groq API Key – admin uses env, users enter their own
+# Groq API Key – admin uses env/secrets, users enter their own
 if "groq_api_key" not in st.session_state:
     st.session_state.groq_api_key = ""
 if "user_provided_groq_key" not in st.session_state:
@@ -77,7 +91,7 @@ if "messages" not in st.session_state:
 INDEX_NAME = "self-learning-rag"
 
 # ------------------------------
-# 2. ALL FUNCTION DEFINITIONS
+# 3. ALL FUNCTION DEFINITIONS
 # ------------------------------
 
 @st.cache_resource
@@ -88,7 +102,6 @@ def get_embeddings():
 def get_llm(api_key):
     """
     Returns a ChatGroq instance using the provided API key.
-    The key is sanitized to avoid encoding errors.
     """
     if not api_key:
         st.error("Groq API key is missing.")
@@ -100,7 +113,7 @@ def get_llm(api_key):
     return ChatGroq(
         temperature=0.3,
         groq_api_key=safe_key,
-        model_name="llama-3.3-70b-versatile"
+        model_name="llama3-70b-8192"   # Changed to a stable model
     )
 
 @st.cache_resource
@@ -256,7 +269,7 @@ def generate_final_answer(question, context_docs, memory_docs):
     return response.content
 
 # ------------------------------
-# 3. STREAMLIT USER INTERFACE
+# 4. STREAMLIT USER INTERFACE
 # ------------------------------
 
 st.set_page_config(page_title="EV-Assistant", layout="wide")
@@ -273,15 +286,15 @@ with st.sidebar:
     is_admin = st.session_state.upload_authorized or st.session_state.feedback_authorized
     
     if is_admin:
-        # Admin: use env key
-        admin_groq_key = os.getenv("GROQ_API_KEY")
+        # Admin: use key from Secrets or env
+        admin_groq_key = get_secret_or_env("GROQ_API_KEY")
         if admin_groq_key:
             safe_key = sanitize_api_key(admin_groq_key)
             st.session_state.groq_api_key = safe_key
-            st.success("✅ Using Admin's Groq API Key (from environment)")
+            st.success("✅ Using Admin's Groq API Key (from Secrets or .env)")
             st.caption(f"Key starts with: {safe_key[:3]}...")
         else:
-            st.error("❌ GROQ_API_KEY not found in environment.")
+            st.error("❌ GROQ_API_KEY not found in Secrets or .env.")
     else:
         # Normal user: ask for their own key
         st.info("🔑 Enter pass Key to chat")
@@ -310,12 +323,12 @@ with st.sidebar:
         type="password"
     )
     if st.button("🔓 Verify Upload Password"):
-        correct_password = os.getenv("UPLOAD_PASSWORD", "admin123")
+        correct_password = get_secret_or_env("UPLOAD_PASSWORD") or "admin123"
         if upload_password == correct_password:
             st.session_state.upload_authorized = True
             st.success("✅ Access granted! You can now upload PDFs.")
             # Load admin Groq key
-            admin_groq_key = os.getenv("GROQ_API_KEY")
+            admin_groq_key = get_secret_or_env("GROQ_API_KEY")
             if admin_groq_key:
                 st.session_state.groq_api_key = sanitize_api_key(admin_groq_key)
                 st.success("✅ Admin Groq key loaded!")
@@ -336,11 +349,11 @@ with st.sidebar:
         key="feedback_password_input"
     )
     if st.button("🔑 Authorize Feedback Settings"):
-        correct_password = os.getenv("UPLOAD_PASSWORD", "admin123")
+        correct_password = get_secret_or_env("UPLOAD_PASSWORD") or "admin123"
         if feedback_password == correct_password:
             st.session_state.feedback_authorized = True
             st.success("✅ Authorized! You can now toggle feedback.")
-            admin_groq_key = os.getenv("GROQ_API_KEY")
+            admin_groq_key = get_secret_or_env("GROQ_API_KEY")
             if admin_groq_key:
                 st.session_state.groq_api_key = sanitize_api_key(admin_groq_key)
                 st.success("✅ Admin Groq key loaded!")
