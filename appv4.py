@@ -85,10 +85,11 @@ def get_llm(api_key):
     if not safe_key:
         st.error("Invalid Groq API key (empty after sanitization).")
         st.stop()
+    # ✅ Updated to the current stable model
     return ChatGroq(
         temperature=0.3,
         groq_api_key=safe_key,
-        model="llama-3.3-70b-instruct"   # ✅ Updated to current stable model
+        model_name="llama-3.3-70b-instruct"   # <-- Correct model
     )
 
 @st.cache_resource
