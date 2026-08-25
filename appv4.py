@@ -5,12 +5,12 @@ import time
 from dotenv import load_dotenv
 
 # ------------------------------
-# 1. PAGE CONFIG – MUST BE FIRST STREAMLIT COMMAND
+# 1. PAGE CONFIG – MUST BE FIRST
 # ------------------------------
 st.set_page_config(page_title="EV-Assistant", layout="wide")
 
 # ------------------------------
-# 2. IMPORTS (after page config)
+# 2. IMPORTS
 # ------------------------------
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -24,9 +24,6 @@ from pinecone import Pinecone, ServerlessSpec
 # 3. HELPER: Get keys from Secrets or .env
 # ------------------------------
 def get_secret_or_env(key_name):
-    """
-    Tries st.secrets (Streamlit Cloud) first, then falls back to os.getenv (local .env).
-    """
     try:
         value = st.secrets.get(key_name)
         if value:
@@ -36,20 +33,18 @@ def get_secret_or_env(key_name):
     return os.getenv(key_name)
 
 def sanitize_api_key(key):
-    """Remove whitespace and non-ASCII characters from an API key."""
     if not key:
         return ""
     return key.strip().encode('ascii', 'ignore').decode('ascii')
 
 # ------------------------------
-# 4. LOAD ENVIRONMENT VARIABLES (for local testing)
+# 4. LOAD ENVIRONMENT VARIABLES (local)
 # ------------------------------
 load_dotenv()
 
 # ------------------------------
 # 5. SESSION STATE INITIALISATION
 # ------------------------------
-# Pinecone API Key
 if "pinecone_api_key" not in st.session_state:
     pinecone_key = get_secret_or_env("PINECONE_API_KEY")
     if not pinecone_key:
@@ -57,13 +52,11 @@ if "pinecone_api_key" not in st.session_state:
         st.stop()
     st.session_state.pinecone_api_key = sanitize_api_key(pinecone_key)
 
-# Groq API Key
 if "groq_api_key" not in st.session_state:
     st.session_state.groq_api_key = ""
 if "user_provided_groq_key" not in st.session_state:
     st.session_state.user_provided_groq_key = ""
 
-# Admin flags
 if "upload_authorized" not in st.session_state:
     st.session_state.upload_authorized = False
 if "feedback_authorized" not in st.session_state:
@@ -74,8 +67,6 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 
 INDEX_NAME = "self-learning-rag"
-
-# Disable deprecated plugin check
 os.environ["PINECONE_DISABLE_DEPRECATED_PLUGIN_CHECK"] = "true"
 
 # ------------------------------
@@ -97,7 +88,7 @@ def get_llm(api_key):
     return ChatGroq(
         temperature=0.3,
         groq_api_key=safe_key,
-        model_name="llama3-70b-8192"   # stable model
+        model="llama-3.3-70b-instruct"   # ✅ Updated to current stable model
     )
 
 @st.cache_resource
@@ -250,7 +241,6 @@ def generate_final_answer(question, context_docs, memory_docs):
 # ------------------------------
 st.title("🧠 Welcome to the AI WORLD, This is your EV assistant")
 
-# --- SIDEBAR ---
 with st.sidebar:
     st.divider()
     st.header("🤖 pass Key")
@@ -346,7 +336,6 @@ with st.sidebar:
     else:
         st.info("🔒 Upload area is locked. Enter the upload password above.")
 
-# --- MAIN CHAT AREA ---
 st.subheader("💬 Ask anything")
 
 try:
@@ -398,7 +387,6 @@ if prompt := st.chat_input("Type your question here..."):
     
     st.session_state.messages.append({"role": "assistant", "content": answer})
 
-# --- Correction handling ---
 if st.session_state.get("waiting_for_correction", False):
     with st.chat_message("assistant"):
         st.warning("🤔 I got it wrong. What is the correct answer?")
