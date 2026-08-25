@@ -1,45 +1,31 @@
-import subprocess
-import sys
-
-# 🔥 Remove the deprecated plugin that causes the error
-try:
-    subprocess.check_call(
-        [sys.executable, "-m", "pip", "uninstall", "-y", "pinecone-plugin-inference"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
-    )
-except Exception:
-    pass  # If it's not installed, we don't care
-
 import streamlit as st
 import os
 import hashlib
 import time
 from dotenv import load_dotenv
 
-os.environ["PINECONE_DISABLE_DEPRECATED_PLUGIN_CHECK"] = "true"
+# ------------------------------
+# 1. PAGE CONFIG – MUST BE FIRST STREAMLIT COMMAND
+# ------------------------------
+st.set_page_config(page_title="EV-Assistant", layout="wide")
 
-# LangChain & Vector DB
+# ------------------------------
+# 2. IMPORTS (after page config)
+# ------------------------------
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_pinecone import PineconeVectorStore
-
-# LLM & Prompting
 from langchain_groq import ChatGroq
 from langchain.prompts import PromptTemplate
-
-# Pinecone SDK v5
 from pinecone import Pinecone, ServerlessSpec
-from langchain_pinecone import PineconeVectorStore
 
 # ------------------------------
-# 0. HELPER: Get keys from Secrets or .env
+# 3. HELPER: Get keys from Secrets or .env
 # ------------------------------
 def get_secret_or_env(key_name):
     """
-    Attempts to read from st.secrets (Streamlit Cloud) first,
-    then falls back to os.getenv (local .env).
+    Tries st.secrets (Streamlit Cloud) first, then falls back to os.getenv (local .env).
     """
     try:
         value = st.secrets.get(key_name)
@@ -49,22 +35,21 @@ def get_secret_or_env(key_name):
         pass
     return os.getenv(key_name)
 
-# ------------------------------
-# 1. HELPER: Sanitize API Keys
-# ------------------------------
 def sanitize_api_key(key):
     """Remove whitespace and non-ASCII characters from an API key."""
     if not key:
         return ""
-    # Strip spaces/newlines, then encode to ASCII ignoring bad chars
     return key.strip().encode('ascii', 'ignore').decode('ascii')
 
 # ------------------------------
-# 2. ENVIRONMENT & SESSION STATE
+# 4. LOAD ENVIRONMENT VARIABLES (for local testing)
 # ------------------------------
-load_dotenv()  # Load .env file locally
+load_dotenv()
 
-# Pinecone API Key – from Secrets or env
+# ------------------------------
+# 5. SESSION STATE INITIALISATION
+# ------------------------------
+# Pinecone API Key
 if "pinecone_api_key" not in st.session_state:
     pinecone_key = get_secret_or_env("PINECONE_API_KEY")
     if not pinecone_key:
@@ -72,13 +57,13 @@ if "pinecone_api_key" not in st.session_state:
         st.stop()
     st.session_state.pinecone_api_key = sanitize_api_key(pinecone_key)
 
-# Groq API Key – admin uses env/secrets, users enter their own
+# Groq API Key
 if "groq_api_key" not in st.session_state:
     st.session_state.groq_api_key = ""
 if "user_provided_groq_key" not in st.session_state:
     st.session_state.user_provided_groq_key = ""
 
-# Admin authorization flags
+# Admin flags
 if "upload_authorized" not in st.session_state:
     st.session_state.upload_authorized = False
 if "feedback_authorized" not in st.session_state:
@@ -90,19 +75,18 @@ if "messages" not in st.session_state:
 
 INDEX_NAME = "self-learning-rag"
 
-# ------------------------------
-# 3. ALL FUNCTION DEFINITIONS
-# ------------------------------
+# Disable deprecated plugin check
+os.environ["PINECONE_DISABLE_DEPRECATED_PLUGIN_CHECK"] = "true"
 
+# ------------------------------
+# 6. FUNCTION DEFINITIONS
+# ------------------------------
 @st.cache_resource
 def get_embeddings():
     return HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
 @st.cache_resource
 def get_llm(api_key):
-    """
-    Returns a ChatGroq instance using the provided API key.
-    """
     if not api_key:
         st.error("Groq API key is missing.")
         st.stop()
@@ -113,7 +97,7 @@ def get_llm(api_key):
     return ChatGroq(
         temperature=0.3,
         groq_api_key=safe_key,
-        model_name="llama3-70b-8192"   # Changed to a stable model
+        model_name="llama3-70b-8192"   # stable model
     )
 
 @st.cache_resource
@@ -147,25 +131,21 @@ def ingest_pdfs(uploaded_files, namespace="pdfs"):
         chunk_overlap=200,
         length_function=len
     )
-    
     all_chunks = []
     all_ids = []
     all_metadatas = []
-    
     for file in uploaded_files:
         with open(file.name, "wb") as f:
             f.write(file.getbuffer())
         loader = PyPDFLoader(file.name)
         docs = loader.load()
         chunks = splitter.split_documents(docs)
-        
         for chunk in chunks:
             chunk_id = generate_document_id(chunk.page_content)
             all_chunks.append(chunk.page_content)
             all_ids.append(chunk_id)
             all_metadatas.append({"source": file.name})
         os.remove(file.name)
-    
     vector_store = PineconeVectorStore(
         index_name=INDEX_NAME,
         embedding=embeddings,
@@ -187,7 +167,6 @@ def hyde_retrieve(question, k=15):
     )
     chain = hyde_prompt | llm
     hypothetical_answer = chain.invoke({"question": question}).content
-    
     embeddings = get_embeddings()
     vector_store = PineconeVectorStore(
         index_name=INDEX_NAME,
@@ -207,8 +186,7 @@ def rerank_documents(query, documents, top_k=4):
     scores = cross_encoder.predict(pairs)
     doc_score_pairs = list(zip(documents, scores))
     doc_score_pairs.sort(key=lambda x: x[1], reverse=True)
-    reranked_docs = [doc for doc, _ in doc_score_pairs[:top_k]]
-    return reranked_docs
+    return [doc for doc, _ in doc_score_pairs[:top_k]]
 
 def retrieve_memory(question, k=2):
     embeddings = get_embeddings()
@@ -243,7 +221,6 @@ def generate_final_answer(question, context_docs, memory_docs):
     memory_text = ""
     if memory_docs:
         memory_text = "## 💡 Past Lessons for similar questions:\n" + "\n\n".join([doc.page_content for doc in memory_docs])
-    
     prompt_template = PromptTemplate.from_template(
         """
         You are an expert assistant. Answer the question ONLY based on the provided context.
@@ -269,24 +246,18 @@ def generate_final_answer(question, context_docs, memory_docs):
     return response.content
 
 # ------------------------------
-# 4. STREAMLIT USER INTERFACE
+# 7. STREAMLIT UI
 # ------------------------------
-
-st.set_page_config(page_title="EV-Assistant", layout="wide")
 st.title("🧠 Welcome to the AI WORLD, This is your EV assistant")
 
 # --- SIDEBAR ---
 with st.sidebar:
-    
     st.divider()
-    
-    # --- Groq API Key Section ---
     st.header("🤖 pass Key")
     
     is_admin = st.session_state.upload_authorized or st.session_state.feedback_authorized
     
     if is_admin:
-        # Admin: use key from Secrets or env
         admin_groq_key = get_secret_or_env("GROQ_API_KEY")
         if admin_groq_key:
             safe_key = sanitize_api_key(admin_groq_key)
@@ -296,7 +267,6 @@ with st.sidebar:
         else:
             st.error("❌ GROQ_API_KEY not found in Secrets or .env.")
     else:
-        # Normal user: ask for their own key
         st.info("🔑 Enter pass Key to chat")
         user_key = st.text_input(
             "Your Key",
@@ -315,19 +285,13 @@ with st.sidebar:
                 st.error("❌ Invalid key (empty after cleaning).")
     
     st.divider()
-    
-    # --- Upload Protection (Admin Login) ---
     st.header("🔒 Upload Protection")
-    upload_password = st.text_input(
-        "Enter password to upload PDFs",
-        type="password"
-    )
+    upload_password = st.text_input("Enter password to upload PDFs", type="password")
     if st.button("🔓 Verify Upload Password"):
         correct_password = get_secret_or_env("UPLOAD_PASSWORD") or "admin123"
         if upload_password == correct_password:
             st.session_state.upload_authorized = True
             st.success("✅ Access granted! You can now upload PDFs.")
-            # Load admin Groq key
             admin_groq_key = get_secret_or_env("GROQ_API_KEY")
             if admin_groq_key:
                 st.session_state.groq_api_key = sanitize_api_key(admin_groq_key)
@@ -338,16 +302,9 @@ with st.sidebar:
             st.error("❌ Wrong password!")
     
     st.divider()
-    
-    # --- Feedback Mode Toggle (Admin only) ---
     st.header("👍 Feedback Mode")
     st.caption("Enable or disable user feedback (thumbs up/down).")
-    
-    feedback_password = st.text_input(
-        "Enter admin password to change feedback mode",
-        type="password",
-        key="feedback_password_input"
-    )
+    feedback_password = st.text_input("Enter admin password to change feedback mode", type="password", key="feedback_password_input")
     if st.button("🔑 Authorize Feedback Settings"):
         correct_password = get_secret_or_env("UPLOAD_PASSWORD") or "admin123"
         if feedback_password == correct_password:
@@ -376,21 +333,14 @@ with st.sidebar:
             st.info("🔴 Feedback is OFF")
     
     st.divider()
-    
-    # --- Upload Section (Admin only) ---
     if st.session_state.upload_authorized:
         st.header("📤 Update Knowledge Base")
-        uploaded_files = st.file_uploader(
-            "Upload PDFs", 
-            type=["pdf"], 
-            accept_multiple_files=True
-        )
-        
+        uploaded_files = st.file_uploader("Upload PDFs", type=["pdf"], accept_multiple_files=True)
         if uploaded_files and st.button("🚀 Add to Vector DB"):
             with st.spinner(f"Processing {len(uploaded_files)} PDF(s)..."):
                 try:
                     num_chunks = ingest_pdfs(uploaded_files)
-                    st.success(f"✅ Uploaded {num_chunks} chunks to Pinecone (duplicates skipped).")
+                    st.success(f"✅ Uploaded {num_chunks} chunks to Pinecone.")
                 except Exception as e:
                     st.error(f"❌ Error: {e}")
     else:
@@ -399,27 +349,22 @@ with st.sidebar:
 # --- MAIN CHAT AREA ---
 st.subheader("💬 Ask anything")
 
-# Ensure Pinecone index exists
 try:
     ensure_index()
 except Exception as e:
     st.error(f"❌ Failed to connect to Pinecone: {e}")
     st.stop()
 
-# Check if Groq key is set
 if not st.session_state.groq_api_key:
     st.warning("⚠️ Please enter your pass key in the sidebar to start chatting.")
     st.stop()
 
-# Show a subtle confirmation that the key is present
 st.caption(f"🔑 Chat mode active")
 
-# Display chat history
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# User input
 if prompt := st.chat_input("Type your question here..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
@@ -428,14 +373,11 @@ if prompt := st.chat_input("Type your question here..."):
     with st.chat_message("assistant"):
         with st.spinner("🔍 thinking..."):
             retrieved_docs = hyde_retrieve(prompt, k=15)
-        
         with st.spinner("🔄 analysing..."):
             top_docs = rerank_documents(prompt, retrieved_docs, top_k=4)
-        
         with st.spinner("🧠 Recalling past lessons..."):
             memory_docs = retrieve_memory(prompt, k=2)
-        
-        with st.spinner("💬 getting  answer for you..."):
+        with st.spinner("💬 getting answer for you..."):
             answer = generate_final_answer(prompt, top_docs, memory_docs)
             st.markdown(answer)
         
