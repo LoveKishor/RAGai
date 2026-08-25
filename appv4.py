@@ -35,14 +35,10 @@ INDEX_NAME = os.getenv("PINECONE_INDEX_NAME", "self-learning-rag")
 PDF_NAMESPACE = "pdfs"
 MEMORY_NAMESPACE = "memory"
 
-# ✅ FIXED: Use a valid Groq production model
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-instruct")
+# ✅ FIXED: use a stable, widely available model
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama3-70b-8192")
 
-EMBEDDING_MODEL = os.getenv(
-    "EMBEDDING_MODEL",
-    "all-MiniLM-L6-v2",
-)
-
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
 RETRIEVE_K = int(os.getenv("RETRIEVE_K", "8"))
 RERANK_K = int(os.getenv("RERANK_K", "4"))
 MEMORY_K = int(os.getenv("MEMORY_K", "2"))
@@ -55,7 +51,6 @@ os.environ["PINECONE_DISABLE_DEPRECATED_PLUGIN_CHECK"] = "true"
 # 4. SECRETS / KEY HELPERS
 # ============================================================
 def get_secret_or_env(name: str) -> str:
-    """Read Streamlit Secret first, then environment variable."""
     try:
         value = st.secrets.get(name)
         if value:
@@ -66,7 +61,6 @@ def get_secret_or_env(name: str) -> str:
 
 
 def sanitize_api_key(key: str | None) -> str:
-    """Remove accidental whitespace/non-ASCII characters."""
     if not key:
         return ""
     return str(key).strip().encode("ascii", "ignore").decode("ascii")
