@@ -35,7 +35,7 @@ INDEX_NAME = os.getenv("PINECONE_INDEX_NAME", "self-learning-rag")
 PDF_NAMESPACE = "pdfs"
 MEMORY_NAMESPACE = "memory"
 
-# ✅ FIXED: use a stable, widely available model
+# Default model – will be overridden by user selection if possible
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama3-70b-8192")
 
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
@@ -83,6 +83,7 @@ DEFAULT_STATE = {
     "messages": [],
     "waiting_for_correction": False,
     "correction_prompt": "",
+    "selected_model": GROQ_MODEL,
 }
 
 for key, value in DEFAULT_STATE.items():
@@ -127,12 +128,28 @@ def get_vector_store(namespace: str):
 
 
 @st.cache_resource
+def get_available_models(api_key: str):
+    """Fetch model IDs accessible with this Groq key."""
+    try:
+        from groq import Groq
+        client = Groq(api_key=api_key)
+        models = client.models.list()
+        # Extract model IDs
+        return [m.id for m in models.data]
+    except Exception as e:
+        st.error(f"Could not fetch models: {e}")
+        # Fallback to common models
+        return ["mixtral-8x7b-32768", "gemma2-9b-it", "llama3-70b-8192"]
+
+
+@st.cache_resource
 def get_llm(api_key: str):
     safe_key = sanitize_api_key(api_key)
     if not safe_key:
         raise ValueError("Groq API key is empty.")
+    model = st.session_state.get("selected_model", GROQ_MODEL)
     return ChatGroq(
-        model=GROQ_MODEL,
+        model=model,
         temperature=0.2,
         max_tokens=1200,
         groq_api_key=safe_key,
@@ -351,15 +368,15 @@ def explain_groq_error(error: Exception) -> str:
             "Create a new Groq key and replace GROQ_API_KEY, or enter "
             "a valid user key."
         )
-    if "model_not_found" in message.lower():
+    if "model_not_found" in message.lower() or "unavailable" in message.lower():
         return (
-            f"❌ Groq model '{GROQ_MODEL}' is unavailable for this key/project. "
-            "Check the model ID and project model permissions."
+            f"❌ The selected model is not available for your key. "
+            f"Please choose another model from the dropdown in the sidebar."
         )
     if "decommissioned" in message.lower():
         return (
-            f"❌ Groq model '{GROQ_MODEL}' has been decommissioned. "
-            "Change GROQ_MODEL to a currently supported production model."
+            f"❌ Groq model '{st.session_state.get('selected_model', GROQ_MODEL)}' has been decommissioned. "
+            "Select a different model from the sidebar."
         )
     return f"❌ Groq request failed: {message}"
 
@@ -401,7 +418,28 @@ with st.sidebar:
                 st.session_state.groq_api_key = cleaned
                 st.success("✅ Groq key accepted.")
 
-    st.caption(f"Model: `{GROQ_MODEL}`")
+    # --- Model selector ---
+    if st.session_state.groq_api_key:
+        available = get_available_models(st.session_state.groq_api_key)
+        if available:
+            current = st.session_state.get("selected_model", available[0])
+            # Ensure current is in the list
+            if current not in available:
+                current = available[0]
+            selected = st.selectbox(
+                "Select Groq model",
+                options=available,
+                index=available.index(current),
+                key="model_selector"
+            )
+            if selected != st.session_state.get("selected_model"):
+                st.session_state.selected_model = selected
+                # Clear LLM cache so it re‑creates with new model
+                st.cache_resource.clear()
+                st.rerun()
+            st.caption(f"Using: `{st.session_state.selected_model}`")
+        else:
+            st.warning("No models available. Check your API key.")
 
     st.divider()
     st.header("🔒 Upload Protection")
