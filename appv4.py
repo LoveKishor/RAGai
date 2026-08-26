@@ -1,61 +1,55 @@
 import os
-import sys
-
-# ------------------------------------------------------------
-# 0. MONKEY-PATCH PINECONE – MUST BE BEFORE ANY LANGCHAIN IMPORTS
-# ------------------------------------------------------------
-os.environ["PINECONE_DISABLE_DEPRECATED_PLUGIN_CHECK"] = "true"
-
-import pinecone.deprecated_plugins
-
-# Override the check function to do nothing before top-level pinecone imports run
-pinecone.deprecated_plugins.check_for_deprecated_plugins = lambda: None
-
-# ------------------------------------------------------------
-# 1. PAGE CONFIG – MUST BE FIRST STREAMLIT COMMAND
-# ------------------------------------------------------------
-import streamlit as st
-
-st.set_page_config(page_title="EV Assistant", layout="wide")
-
-# ------------------------------------------------------------
-# 2. IMPORTS
-# ------------------------------------------------------------
 import hashlib
 import tempfile
+
+import streamlit as st
 from dotenv import load_dotenv
 
+# ============================================================
+# 1. PAGE CONFIG
+# ============================================================
+st.set_page_config(
+    page_title="EV Assistant",
+    page_icon="🧠",
+    layout="wide",
+)
+
+# ============================================================
+# 2. IMPORTS
+# ============================================================
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_pinecone import PineconeVectorStore
 from langchain_groq import ChatGroq
 from langchain_core.prompts import PromptTemplate
-
-import pinecone
 from pinecone import Pinecone, ServerlessSpec
 
-# ------------------------------------------------------------
+
+# ============================================================
 # 3. CONFIGURATION
-# ------------------------------------------------------------
+# ============================================================
 load_dotenv()
 
 INDEX_NAME = os.getenv("PINECONE_INDEX_NAME", "self-learning-rag")
 PDF_NAMESPACE = "pdfs"
 MEMORY_NAMESPACE = "memory"
 
+# Default model – will be overridden by user selection if possible
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama3-70b-8192")
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
 
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
 RETRIEVE_K = int(os.getenv("RETRIEVE_K", "8"))
 RERANK_K = int(os.getenv("RERANK_K", "4"))
 MEMORY_K = int(os.getenv("MEMORY_K", "2"))
 USE_HYDE = os.getenv("USE_HYDE", "false").lower() == "true"
 
+os.environ["PINECONE_DISABLE_DEPRECATED_PLUGIN_CHECK"] = "true"
 
-# ------------------------------------------------------------
+
+# ============================================================
 # 4. SECRETS / KEY HELPERS
-# ------------------------------------------------------------
+# ============================================================
 def get_secret_or_env(name: str) -> str:
     try:
         value = st.secrets.get(name)
@@ -76,9 +70,9 @@ def get_admin_groq_key() -> str:
     return sanitize_api_key(get_secret_or_env("GROQ_API_KEY"))
 
 
-# ------------------------------------------------------------
+# ============================================================
 # 5. SESSION STATE
-# ------------------------------------------------------------
+# ============================================================
 DEFAULT_STATE = {
     "pinecone_api_key": "",
     "groq_api_key": "",
@@ -104,9 +98,9 @@ if not st.session_state.pinecone_api_key:
     st.session_state.pinecone_api_key = pinecone_key
 
 
-# ------------------------------------------------------------
+# ============================================================
 # 6. CACHED RESOURCES
-# ------------------------------------------------------------
+# ============================================================
 @st.cache_resource(show_spinner="Loading embedding model...")
 def get_embeddings():
     return HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
@@ -124,12 +118,12 @@ def get_pinecone_client(api_key: str):
 
 
 @st.cache_resource
-def get_vector_store(namespace: str, api_key: str):
+def get_vector_store(namespace: str):
     return PineconeVectorStore(
         index_name=INDEX_NAME,
         embedding=get_embeddings(),
         namespace=namespace,
-        pinecone_api_key=api_key,
+        pinecone_api_key=st.session_state.pinecone_api_key,
     )
 
 
@@ -140,19 +134,22 @@ def get_available_models(api_key: str):
         from groq import Groq
         client = Groq(api_key=api_key)
         models = client.models.list()
+        # Extract model IDs
         return [m.id for m in models.data]
     except Exception as e:
         st.error(f"Could not fetch models: {e}")
+        # Fallback to common models
         return ["mixtral-8x7b-32768", "gemma2-9b-it", "llama3-70b-8192"]
 
 
 @st.cache_resource
-def get_llm(api_key: str, model_name: str):
+def get_llm(api_key: str):
     safe_key = sanitize_api_key(api_key)
     if not safe_key:
         raise ValueError("Groq API key is empty.")
+    model = st.session_state.get("selected_model", GROQ_MODEL)
     return ChatGroq(
-        model=model_name,
+        model=model,
         temperature=0.2,
         max_tokens=1200,
         groq_api_key=safe_key,
@@ -191,9 +188,10 @@ Answer:
     )
 
 
-# ------------------------------------------------------------
+# ============================================================
 # 7. PINECONE INDEX
-# ------------------------------------------------------------
+# ============================================================
+@st.cache_resource
 def ensure_index():
     pc = get_pinecone_client(st.session_state.pinecone_api_key)
     existing = pc.list_indexes().names()
@@ -207,9 +205,9 @@ def ensure_index():
     return True
 
 
-# ------------------------------------------------------------
+# ============================================================
 # 8. ID / PDF INGESTION
-# ------------------------------------------------------------
+# ============================================================
 def generate_document_id(*parts: str) -> str:
     raw = "||".join(str(part) for part in parts)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -262,7 +260,7 @@ def ingest_pdfs(uploaded_files, namespace: str = PDF_NAMESPACE) -> int:
     if not all_chunks:
         return 0
 
-    vector_store = get_vector_store(namespace, st.session_state.pinecone_api_key)
+    vector_store = get_vector_store(namespace)
     vector_store.add_texts(
         texts=all_chunks,
         metadatas=all_metadatas,
@@ -272,13 +270,13 @@ def ingest_pdfs(uploaded_files, namespace: str = PDF_NAMESPACE) -> int:
     return len(all_chunks)
 
 
-# ------------------------------------------------------------
+# ============================================================
 # 9. RETRIEVAL
-# ------------------------------------------------------------
+# ============================================================
 def direct_retrieve(question: str, k: int = RETRIEVE_K):
     if not question.strip():
         return []
-    vector_store = get_vector_store(PDF_NAMESPACE, st.session_state.pinecone_api_key)
+    vector_store = get_vector_store(PDF_NAMESPACE)
     retriever = vector_store.as_retriever(search_kwargs={"k": k})
     return retriever.invoke(question)
 
@@ -288,10 +286,7 @@ def hyde_retrieve(question: str, k: int = RETRIEVE_K):
         return direct_retrieve(question, k)
 
     try:
-        llm = get_llm(
-            st.session_state.groq_api_key,
-            st.session_state.get("selected_model", GROQ_MODEL),
-        )
+        llm = get_llm(st.session_state.groq_api_key)
         prompt = (
             "Write a short factual passage containing the concepts "
             "likely to appear in a technical EV document that answers "
@@ -299,7 +294,7 @@ def hyde_retrieve(question: str, k: int = RETRIEVE_K):
             f"Question: {question}\n\nPassage:"
         )
         hypothetical = llm.invoke(prompt).content
-        vector_store = get_vector_store(PDF_NAMESPACE, st.session_state.pinecone_api_key)
+        vector_store = get_vector_store(PDF_NAMESPACE)
         retriever = vector_store.as_retriever(search_kwargs={"k": k})
         return retriever.invoke(hypothetical)
     except Exception:
@@ -319,11 +314,11 @@ def rerank_documents(query: str, documents, top_k: int = RERANK_K):
     return [doc for doc, _ in ranked[:top_k]]
 
 
-# ------------------------------------------------------------
+# ============================================================
 # 10. MEMORY
-# ------------------------------------------------------------
+# ============================================================
 def retrieve_memory(question: str, k: int = MEMORY_K):
-    vector_store = get_vector_store(MEMORY_NAMESPACE, st.session_state.pinecone_api_key)
+    vector_store = get_vector_store(MEMORY_NAMESPACE)
     retriever = vector_store.as_retriever(search_kwargs={"k": k})
     return retriever.invoke(question)
 
@@ -331,7 +326,7 @@ def retrieve_memory(question: str, k: int = MEMORY_K):
 def save_to_memory(question: str, answer: str):
     text = f"Question: {question}\nAnswer: {answer}"
     doc_id = generate_document_id("memory", question, answer)
-    vector_store = get_vector_store(MEMORY_NAMESPACE, st.session_state.pinecone_api_key)
+    vector_store = get_vector_store(MEMORY_NAMESPACE)
     vector_store.add_texts(
         texts=[text],
         metadatas=[{"type": "user_feedback"}],
@@ -339,17 +334,14 @@ def save_to_memory(question: str, answer: str):
     )
 
 
-# ------------------------------------------------------------
+# ============================================================
 # 11. ANSWER GENERATION
-# ------------------------------------------------------------
+# ============================================================
 def generate_final_answer(question: str, context_docs, memory_docs):
     if not context_docs:
         return "I could not find relevant information in the EV knowledge base for this question."
 
-    llm = get_llm(
-        st.session_state.groq_api_key,
-        st.session_state.get("selected_model", GROQ_MODEL),
-    )
+    llm = get_llm(st.session_state.groq_api_key)
     context_text = "\n\n".join(doc.page_content for doc in context_docs)
     memory_text = "\n\n".join(doc.page_content for doc in memory_docs) if memory_docs else "None"
 
@@ -364,29 +356,34 @@ def generate_final_answer(question: str, context_docs, memory_docs):
     return response.content
 
 
-# ------------------------------------------------------------
+# ============================================================
 # 12. GROQ ERROR HANDLING
-# ------------------------------------------------------------
+# ============================================================
 def explain_groq_error(error: Exception) -> str:
     message = str(error)
     if "401" in message or "invalid_api_key" in message.lower():
         return (
             "❌ Groq authentication failed. The API key is invalid, "
-            "expired, revoked, or not the key you intended to use."
+            "expired, revoked, or not the key you intended to use. "
+            "Create a new Groq key and replace GROQ_API_KEY, or enter "
+            "a valid user key."
         )
     if "model_not_found" in message.lower() or "unavailable" in message.lower():
-        return "❌ The selected model is unavailable for your key. Choose another model."
+        return (
+            f"❌ The selected model is not available for your key. "
+            f"Please choose another model from the dropdown in the sidebar."
+        )
     if "decommissioned" in message.lower():
         return (
-            f"❌ Groq model '{st.session_state.get('selected_model', GROQ_MODEL)}' is decommissioned. "
-            "Select a different model in the sidebar."
+            f"❌ Groq model '{st.session_state.get('selected_model', GROQ_MODEL)}' has been decommissioned. "
+            "Select a different model from the sidebar."
         )
     return f"❌ Groq request failed: {message}"
 
 
-# ------------------------------------------------------------
+# ============================================================
 # 13. SIDEBAR
-# ------------------------------------------------------------
+# ============================================================
 st.title("🧠 EV Assistant")
 
 with st.sidebar:
@@ -400,12 +397,12 @@ with st.sidebar:
             st.session_state.groq_api_key = admin_key
             st.success("✅ Admin Groq key loaded.")
         else:
-            st.error("GROQ_API_KEY is not configured in Secrets/.env.")
-        
+            st.error("GROQ_API_KEY is not configured in Streamlit Secrets/.env.")
+        # Logout button
         if st.button("🚪 Logout (exit admin mode)"):
             st.session_state.upload_authorized = False
             st.session_state.feedback_authorized = False
-            st.session_state.groq_api_key = ""
+            st.session_state.groq_api_key = ""  # Clear admin key
             st.rerun()
     else:
         st.info("🔑 Enter your own Groq API key to chat")
@@ -426,16 +423,19 @@ with st.sidebar:
         available = get_available_models(st.session_state.groq_api_key)
         if available:
             current = st.session_state.get("selected_model", available[0])
+            # Ensure current is in the list
             if current not in available:
                 current = available[0]
             selected = st.selectbox(
                 "Select Groq model",
                 options=available,
                 index=available.index(current),
-                key="model_selector",
+                key="model_selector"
             )
             if selected != st.session_state.get("selected_model"):
                 st.session_state.selected_model = selected
+                # Clear LLM cache so it re‑creates with new model
+                st.cache_resource.clear()
                 st.rerun()
             st.caption(f"Using: `{st.session_state.selected_model}`")
         else:
@@ -518,9 +518,9 @@ with st.sidebar:
         st.info("🔒 Upload area is locked.")
 
 
-# ------------------------------------------------------------
+# ============================================================
 # 14. STARTUP CHECKS
-# ------------------------------------------------------------
+# ============================================================
 try:
     ensure_index()
 except Exception as error:
@@ -532,9 +532,9 @@ if not st.session_state.groq_api_key:
     st.stop()
 
 
-# ------------------------------------------------------------
+# ============================================================
 # 15. CHAT HISTORY
-# ------------------------------------------------------------
+# ============================================================
 st.subheader("💬 Ask anything")
 
 for msg in st.session_state.messages:
@@ -542,9 +542,9 @@ for msg in st.session_state.messages:
         st.markdown(msg["content"])
 
 
-# ------------------------------------------------------------
+# ============================================================
 # 16. CHAT PIPELINE
-# ------------------------------------------------------------
+# ============================================================
 if prompt := st.chat_input("Type your EV question..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
 
@@ -590,9 +590,9 @@ if prompt := st.chat_input("Type your EV question..."):
                     st.rerun()
 
 
-# ------------------------------------------------------------
+# ============================================================
 # 17. CORRECTION WORKFLOW
-# ------------------------------------------------------------
+# ============================================================
 if st.session_state.waiting_for_correction:
     with st.chat_message("assistant"):
         st.warning("🤔 What is the correct answer?")
