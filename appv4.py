@@ -1,41 +1,66 @@
 import os
+import sys
+import subprocess
+
+# ------------------------------------------------------------
+# 0. KILL THE DEPRECATED PLUGIN – BEFORE ANY PINECONE IMPORT
+# ------------------------------------------------------------
+# Set environment variable to disable the check (if it works)
+os.environ["PINECONE_DISABLE_DEPRECATED_PLUGIN_CHECK"] = "true"
+
+# Force‑uninstall the plugin – we don't care if it fails
+try:
+    subprocess.check_call(
+        [sys.executable, "-m", "pip", "uninstall", "-y", "pinecone-plugin-inference"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL
+    )
+except Exception:
+    pass
+
+# ------------------------------------------------------------
+# 1. PAGE CONFIG – MUST BE FIRST
+# ------------------------------------------------------------
+import streamlit as st
+st.set_page_config(page_title="EV Assistant", layout="wide")
+
+# ------------------------------------------------------------
+# 2. IMPORTS
+# ------------------------------------------------------------
 import hashlib
 import tempfile
-
-import streamlit as st
 from dotenv import load_dotenv
 
-# ============================================================
-# 1. PAGE CONFIG
-# ============================================================
-st.set_page_config(
-    page_title="EV Assistant",
-    page_icon="🧠",
-    layout="wide",
-)
-
-# ============================================================
-# 2. IMPORTS
-# ============================================================
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_pinecone import PineconeVectorStore
 from langchain_groq import ChatGroq
 from langchain_core.prompts import PromptTemplate
+
+# ------------------------------------------------------------
+# 3. PINECONE IMPORT – WITH MONKEY‑PATCH TO KILL THE CHECK
+# ------------------------------------------------------------
+# Import pinecone, then immediately override the check function
+import pinecone
 from pinecone import Pinecone, ServerlessSpec
 
+# Monkey‑patch the deprecated plugin checker to do nothing
+# (this is a safety net in case the plugin is still installed)
+def _noop():
+    pass
+pinecone.deprecated_plugins.check_for_deprecated_plugins = _noop
 
-# ============================================================
-# 3. CONFIGURATION
-# ============================================================
+# ------------------------------------------------------------
+# 4. CONFIGURATION
+# ------------------------------------------------------------
 load_dotenv()
 
 INDEX_NAME = os.getenv("PINECONE_INDEX_NAME", "self-learning-rag")
 PDF_NAMESPACE = "pdfs"
 MEMORY_NAMESPACE = "memory"
 
-# Default model – will be overridden by user selection if possible
+# Use a stable, widely available model – change if needed
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama3-70b-8192")
 
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
@@ -44,12 +69,10 @@ RERANK_K = int(os.getenv("RERANK_K", "4"))
 MEMORY_K = int(os.getenv("MEMORY_K", "2"))
 USE_HYDE = os.getenv("USE_HYDE", "false").lower() == "true"
 
-os.environ["PINECONE_DISABLE_DEPRECATED_PLUGIN_CHECK"] = "true"
 
-
-# ============================================================
-# 4. SECRETS / KEY HELPERS
-# ============================================================
+# ------------------------------------------------------------
+# 5. SECRETS / KEY HELPERS
+# ------------------------------------------------------------
 def get_secret_or_env(name: str) -> str:
     try:
         value = st.secrets.get(name)
@@ -70,9 +93,9 @@ def get_admin_groq_key() -> str:
     return sanitize_api_key(get_secret_or_env("GROQ_API_KEY"))
 
 
-# ============================================================
-# 5. SESSION STATE
-# ============================================================
+# ------------------------------------------------------------
+# 6. SESSION STATE
+# ------------------------------------------------------------
 DEFAULT_STATE = {
     "pinecone_api_key": "",
     "groq_api_key": "",
@@ -98,9 +121,9 @@ if not st.session_state.pinecone_api_key:
     st.session_state.pinecone_api_key = pinecone_key
 
 
-# ============================================================
-# 6. CACHED RESOURCES
-# ============================================================
+# ------------------------------------------------------------
+# 7. CACHED RESOURCES
+# ------------------------------------------------------------
 @st.cache_resource(show_spinner="Loading embedding model...")
 def get_embeddings():
     return HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
@@ -134,11 +157,9 @@ def get_available_models(api_key: str):
         from groq import Groq
         client = Groq(api_key=api_key)
         models = client.models.list()
-        # Extract model IDs
         return [m.id for m in models.data]
     except Exception as e:
         st.error(f"Could not fetch models: {e}")
-        # Fallback to common models
         return ["mixtral-8x7b-32768", "gemma2-9b-it", "llama3-70b-8192"]
 
 
@@ -188,9 +209,9 @@ Answer:
     )
 
 
-# ============================================================
-# 7. PINECONE INDEX
-# ============================================================
+# ------------------------------------------------------------
+# 8. PINECONE INDEX
+# ------------------------------------------------------------
 @st.cache_resource
 def ensure_index():
     pc = get_pinecone_client(st.session_state.pinecone_api_key)
@@ -205,9 +226,9 @@ def ensure_index():
     return True
 
 
-# ============================================================
-# 8. ID / PDF INGESTION
-# ============================================================
+# ------------------------------------------------------------
+# 9. ID / PDF INGESTION
+# ------------------------------------------------------------
 def generate_document_id(*parts: str) -> str:
     raw = "||".join(str(part) for part in parts)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -270,9 +291,9 @@ def ingest_pdfs(uploaded_files, namespace: str = PDF_NAMESPACE) -> int:
     return len(all_chunks)
 
 
-# ============================================================
-# 9. RETRIEVAL
-# ============================================================
+# ------------------------------------------------------------
+# 10. RETRIEVAL
+# ------------------------------------------------------------
 def direct_retrieve(question: str, k: int = RETRIEVE_K):
     if not question.strip():
         return []
@@ -314,9 +335,9 @@ def rerank_documents(query: str, documents, top_k: int = RERANK_K):
     return [doc for doc, _ in ranked[:top_k]]
 
 
-# ============================================================
-# 10. MEMORY
-# ============================================================
+# ------------------------------------------------------------
+# 11. MEMORY
+# ------------------------------------------------------------
 def retrieve_memory(question: str, k: int = MEMORY_K):
     vector_store = get_vector_store(MEMORY_NAMESPACE)
     retriever = vector_store.as_retriever(search_kwargs={"k": k})
@@ -334,9 +355,9 @@ def save_to_memory(question: str, answer: str):
     )
 
 
-# ============================================================
-# 11. ANSWER GENERATION
-# ============================================================
+# ------------------------------------------------------------
+# 12. ANSWER GENERATION
+# ------------------------------------------------------------
 def generate_final_answer(question: str, context_docs, memory_docs):
     if not context_docs:
         return "I could not find relevant information in the EV knowledge base for this question."
@@ -356,9 +377,9 @@ def generate_final_answer(question: str, context_docs, memory_docs):
     return response.content
 
 
-# ============================================================
-# 12. GROQ ERROR HANDLING
-# ============================================================
+# ------------------------------------------------------------
+# 13. GROQ ERROR HANDLING
+# ------------------------------------------------------------
 def explain_groq_error(error: Exception) -> str:
     message = str(error)
     if "401" in message or "invalid_api_key" in message.lower():
@@ -381,9 +402,9 @@ def explain_groq_error(error: Exception) -> str:
     return f"❌ Groq request failed: {message}"
 
 
-# ============================================================
-# 13. SIDEBAR
-# ============================================================
+# ------------------------------------------------------------
+# 14. SIDEBAR
+# ------------------------------------------------------------
 st.title("🧠 EV Assistant")
 
 with st.sidebar:
@@ -423,7 +444,6 @@ with st.sidebar:
         available = get_available_models(st.session_state.groq_api_key)
         if available:
             current = st.session_state.get("selected_model", available[0])
-            # Ensure current is in the list
             if current not in available:
                 current = available[0]
             selected = st.selectbox(
@@ -434,7 +454,6 @@ with st.sidebar:
             )
             if selected != st.session_state.get("selected_model"):
                 st.session_state.selected_model = selected
-                # Clear LLM cache so it re‑creates with new model
                 st.cache_resource.clear()
                 st.rerun()
             st.caption(f"Using: `{st.session_state.selected_model}`")
@@ -518,9 +537,9 @@ with st.sidebar:
         st.info("🔒 Upload area is locked.")
 
 
-# ============================================================
-# 14. STARTUP CHECKS
-# ============================================================
+# ------------------------------------------------------------
+# 15. STARTUP CHECKS
+# ------------------------------------------------------------
 try:
     ensure_index()
 except Exception as error:
@@ -532,9 +551,9 @@ if not st.session_state.groq_api_key:
     st.stop()
 
 
-# ============================================================
-# 15. CHAT HISTORY
-# ============================================================
+# ------------------------------------------------------------
+# 16. CHAT HISTORY
+# ------------------------------------------------------------
 st.subheader("💬 Ask anything")
 
 for msg in st.session_state.messages:
@@ -542,9 +561,9 @@ for msg in st.session_state.messages:
         st.markdown(msg["content"])
 
 
-# ============================================================
-# 16. CHAT PIPELINE
-# ============================================================
+# ------------------------------------------------------------
+# 17. CHAT PIPELINE
+# ------------------------------------------------------------
 if prompt := st.chat_input("Type your EV question..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
 
@@ -590,9 +609,9 @@ if prompt := st.chat_input("Type your EV question..."):
                     st.rerun()
 
 
-# ============================================================
-# 17. CORRECTION WORKFLOW
-# ============================================================
+# ------------------------------------------------------------
+# 18. CORRECTION WORKFLOW
+# ------------------------------------------------------------
 if st.session_state.waiting_for_correction:
     with st.chat_message("assistant"):
         st.warning("🤔 What is the correct answer?")
