@@ -66,8 +66,6 @@ pillow==10.4.0
 pinecone==7.3.0
 pinecone-client==5.0.0
 pinecone-plugin-assistant==1.8.0
-pinecone-plugin-inference==1.0.2
-pinecone-plugin-interface==0.0.7
 propcache==0.5.2
 protobuf==5.29.6
 pyarrow==24.0.0
